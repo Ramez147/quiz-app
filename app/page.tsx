@@ -96,7 +96,7 @@ export default function Home() {
 
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-10 bg-gray-50 text-gray-800">
-      <h1 className="text-3xl font-bold mb-8">Was möchtest du trinken?</h1>
+      <h1 className="text-3xl font-bold mb-8">Was möchtest du machen?</h1>
       {redisStatus && (
         <p className={`mb-2 text-sm ${isRedisReady ? 'text-green-700' : 'text-red-700'}`}>
           {redisStatus}
