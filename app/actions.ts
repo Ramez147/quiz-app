@@ -1,18 +1,33 @@
 "use server";
 import { createClient } from "redis";
+import { cookies } from "next/headers";
 
 type VoteResults = Record<string, number>;
+const OPTIONS = ["Kaffee ☕", "Tee 🍵", "Mate 🧉"] as const;
+const VALID_OPTIONS = new Set<string>(OPTIONS);
+const VOTES_KEY = "votes";
+const USER_VOTES_KEY = "user_votes";
+const VOTER_COOKIE = "voter_id";
 
 type AppRedisClient = ReturnType<typeof createClient>;
 
 let redisClient: AppRedisClient | null = null;
 
+function getRedisUrl(): string | null {
+  return (
+    process.env.REDIS_URL ??
+    process.env.REDIS_TLS_URL ??
+    process.env.VERCEL_REDIS_URL ??
+    null
+  );
+}
+
 async function getRedisClient(): Promise<AppRedisClient> {
-  const url = process.env.REDIS_URL;
+  const url = getRedisUrl();
 
   if (!url) {
     throw new Error(
-      "Redis ist nicht konfiguriert. Setze REDIS_URL (z. B. redis://...)."
+      "Redis ist nicht konfiguriert. Setze REDIS_URL (oder REDIS_TLS_URL / VERCEL_REDIS_URL) mit einer redis:// oder rediss:// Verbindung."
     );
   }
 
@@ -27,16 +42,87 @@ async function getRedisClient(): Promise<AppRedisClient> {
   return redisClient;
 }
 
+export async function getRedisHealth(): Promise<{ ok: boolean; message: string }> {
+  const url = getRedisUrl();
+
+  if (!url) {
+    return {
+      ok: false,
+      message:
+        "Redis ist nicht konfiguriert. Setze REDIS_URL (oder REDIS_TLS_URL / VERCEL_REDIS_URL).",
+    };
+  }
+
+  try {
+    const redis = await getRedisClient();
+    const pong = await redis.ping();
+
+    if (pong !== "PONG") {
+      return {
+        ok: false,
+        message: "Redis antwortet unerwartet auf den Health-Check.",
+      };
+    }
+
+    return { ok: true, message: "Redis verbunden." };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Unbekannter Fehler";
+    return {
+      ok: false,
+      message: `Redis nicht erreichbar: ${detail}`,
+    };
+  }
+}
+
+async function getOrCreateVoterId(): Promise<string> {
+  const cookieStore = await cookies();
+  const existingId = cookieStore.get(VOTER_COOKIE)?.value;
+
+  if (existingId) {
+    return existingId;
+  }
+
+  const newId = crypto.randomUUID();
+  cookieStore.set(VOTER_COOKIE, newId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 60 * 60 * 24 * 365,
+    path: "/",
+  });
+
+  return newId;
+}
+
 export async function selectOption(option: string) {
+  if (!VALID_OPTIONS.has(option)) {
+    throw new Error("Ungültige Option.");
+  }
+
   const redis = await getRedisClient();
-  // Erhöht den Zähler für die gewählte Option um 1
-  await redis.hIncrBy("votes", option, 1);
+  const voterId = await getOrCreateVoterId();
+  const previousOption = await redis.hGet(USER_VOTES_KEY, voterId);
+
+  if (previousOption === option) {
+    return;
+  }
+
+  const tx = redis.multi();
+
+  // Eine Stimme pro User: alte Stimme entfernen, neue setzen.
+  if (previousOption && VALID_OPTIONS.has(previousOption)) {
+    tx.hIncrBy(VOTES_KEY, previousOption, -1);
+  }
+
+  tx.hIncrBy(VOTES_KEY, option, 1);
+  tx.hSet(USER_VOTES_KEY, voterId, option);
+  await tx.exec();
 }
 
 export async function getResults(): Promise<VoteResults> {
   const redis = await getRedisClient();
   // Holt alle Stimmen aus der Datenbank
-  const results = await redis.hGetAll("votes");
+  const results = await redis.hGetAll(VOTES_KEY);
 
   if (!results || Object.keys(results).length === 0) {
     return {};

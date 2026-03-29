@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect } from 'react';
-import { selectOption, getResults } from './actions';
+import { selectOption, getResults, getRedisHealth } from './actions';
 
 const OPTIONS = ["Kaffee ☕", "Tee 🍵", "Mate 🧉"] as const;
 
@@ -27,6 +27,8 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [redisStatus, setRedisStatus] = useState<string | null>(null);
+  const [isRedisReady, setIsRedisReady] = useState<boolean | null>(null);
 
   // Funktion zum Laden der aktuellen Ergebnisse
   const loadResults = async () => {
@@ -38,16 +40,25 @@ export default function Home() {
     let isActive = true;
 
     // Fetch asynchron im Effect, um kein synchrones setState im Effect-Body zu triggern.
-    void getResults()
-      .then((data) => {
+    void Promise.all([getResults(), getRedisHealth()])
+      .then(([data, health]) => {
         if (!isActive) {
           return;
         }
+
         setResults(normalizeResults(data as Record<string, unknown>));
+        setIsRedisReady(health.ok);
+        setRedisStatus(health.message);
+
+        if (!health.ok) {
+          setError('Datenbankverbindung fehlt. Bitte Konfiguration prüfen.');
+        }
       })
       .catch(() => {
         if (isActive) {
           setError('Ergebnisse konnten nicht geladen werden.');
+          setIsRedisReady(false);
+          setRedisStatus('Redis-Status konnte nicht geprüft werden.');
         }
       })
       .finally(() => {
@@ -62,6 +73,11 @@ export default function Home() {
   }, []);
 
   const handleSelect = async (option: VoteOption) => {
+    if (isRedisReady === false) {
+      setError('Stimmen ist aktuell nicht möglich, weil Redis nicht erreichbar ist.');
+      return;
+    }
+
     setSelected(option);
     setIsSubmitting(true);
     setError(null);
@@ -76,9 +92,16 @@ export default function Home() {
     }
   };
 
+  const isInteractionBlocked = isSubmitting || isRedisReady === false;
+
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-10 bg-gray-50 text-gray-800">
       <h1 className="text-3xl font-bold mb-8">Was möchtest du trinken?</h1>
+      {redisStatus && (
+        <p className={`mb-2 text-sm ${isRedisReady ? 'text-green-700' : 'text-red-700'}`}>
+          {redisStatus}
+        </p>
+      )}
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
       
       <div className="flex gap-4 mb-12">
@@ -86,8 +109,8 @@ export default function Home() {
           <button
             key={opt}
             onClick={() => handleSelect(opt)}
-            disabled={isSubmitting}
-            className={`px-6 py-3 rounded-lg border-2 transition ${selected === opt ? "bg-blue-500 text-white" : "bg-white"} ${isSubmitting ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-50"}`}
+            disabled={isInteractionBlocked}
+            className={`px-6 py-3 rounded-lg border-2 transition ${selected === opt ? "bg-blue-500 text-white" : "bg-white"} ${isInteractionBlocked ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-50"}`}
           >
             {opt}
           </button>
